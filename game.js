@@ -1,0 +1,181 @@
+/* 幾何神廚 — 不需伺服器。切割結果由 geometry.js 的同一個模型和平面計算。 */
+(()=>{'use strict';
+const $=s=>document.querySelector(s),app=$('#app'),status=$('#status');
+const names=['見習小廚師','均勻擺盤師','主廚挑戰'],colors=[['#96ce77','#3e8d68'],['#ffa8a0','#d95e78'],['#f8d27a','#d08f37'],['#9dd9e8','#438eac'],['#cdb7f3','#805cbd'],['#f6b779','#c67645'],['#82d4ba','#398d7a'],['#ffd78b','#bc8e4b'],['#e7a7c3','#ad668a']];
+const safeStore={get(k,def){try{return JSON.parse(localStorage.getItem(k))??def}catch{return def}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}},clear(){try{localStorage.removeItem('chef-scores');localStorage.removeItem('chef-played')}catch{}}};
+let config={set:1,mode:'quick',random:true,shuffle:true,mute:false,reduced:false,nickname:'小廚師'},state=null,raf=0,audio=null,stamp=0;
+function toast(m){const el=$('#toast');el.textContent=m;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),1650)}
+function sound(kind){if(config.mute)return;try{audio ||= new (window.AudioContext||window.webkitAudioContext)();audio.resume();let o=audio.createOscillator(),g=audio.createGain();o.connect(g);g.connect(audio.destination);o.type=kind==='win'?'sine':'triangle';let t=audio.currentTime;o.frequency.setValueAtTime(kind==='win'?680:230,t);o.frequency.exponentialRampToValueAtTime(kind==='win'?1080:170,t+.16);g.gain.setValueAtTime(.001,t);g.gain.exponentialRampToValueAtTime(.09,t+.015);g.gain.exponentialRampToValueAtTime(.001,t+.22);o.start(t);o.stop(t+.24)}catch{}}
+function shuffle(a){return [...a].sort(()=>Math.random()-.5)}
+function home(){cancelAnimationFrame(raf);state=null;status.textContent='手指一劃・真實截面';const played=safeStore.get('chef-played',[]);app.innerHTML=`<div class="panel hero"><div class="chef-face">👩🏻‍🍳</div><h1>幾何神廚：一刀截面挑戰</h1><p><strong>像 Fruit Ninja 一樣，直接在食材上揮刀！</strong><br>畫出橫切、直切或斜切手勢，由你的下刀方向及位置決定截面。重點是像切卡通食物一樣直接揮刀，不是選擇題。</p><p class="notice">本遊戲的食材經幾何模具塑形，請以畫面中的立體外形作答。<br>每題只有一刀；完整模式每題最多 60 秒，15 題可能超過 15 分鐘；快閃模式每題最多 25 秒，目標約 8–10 分鐘。</p><div class="settings"><label>菜單<select id="pick"><option value="random">🎲 優先隨機未玩過的菜單</option>${THEMES.map((x,i)=>`<option value="${i+1}">${i+1}. ${x[0]} ${played.includes(i+1)?'✓':''}</option>`).join('')}</select></label><label>遊戲模式<select id="mode"><option value="quick">⚡ 課堂快閃（25 秒）</option><option value="full">🍽️ 完整練習（60 秒）</option></select></label><label>匿名暱稱<input id="nickname" maxlength="14" value="${escapeHtml(config.nickname)}" placeholder="小廚師"></label><label class="check"><input type="checkbox" id="shuffle" ${config.shuffle?'checked':''}> 同關題序隨機</label><label class="check"><input type="checkbox" id="reduced" ${config.reduced?'checked':''}> 減少動畫</label><label class="check"><input type="checkbox" id="mutebox" ${config.mute?'checked':''}> 關閉音效</label></div><div class="actions"><button class="primary" id="start">🔪 開始揮刀</button><button id="teacher">📚 教師答案</button><button id="ranking">🏆 本機排行榜</button><button id="clear">清除本機紀錄</button></div><div class="notice small" style="margin-top:18px">均勻截面：沿指定方向，在立體不同位置得到的截面，形狀和大小都相同。<br>三句重點：先看擺放再看平面；均勻截面形狀和大小均相同；一刀是一個平面，不能用多刀雕刻。</div></div>`;
+$('#start').onclick=()=>{config.mode=$('#mode').value;config.shuffle=$('#shuffle').checked;config.reduced=$('#reduced').checked;config.mute=$('#mutebox').checked;config.nickname=$('#nickname').value.trim()||'小廚師';let choice=$('#pick').value;if(choice==='random'){let fresh=THEMES.map((_,i)=>i+1).filter(x=>!played.includes(x));choice=(fresh.length?fresh:THEMES.map((_,i)=>i+1))[Math.floor(Math.random()*(fresh.length||THEMES.length))]}start(+choice)};
+$('#ranking').onclick=ranking;$('#teacher').onclick=teacher;$('#clear').onclick=()=>{if(confirm('確定清除本裝置的成績及已玩菜單記錄？')){safeStore.clear();toast('本機紀錄已清除');home()}};$('#mutebox').onchange=e=>{config.mute=e.target.checked;updateMute()};$('#reduced').onchange=e=>config.reduced=e.target.checked;
+}
+function escapeHtml(t){return String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function start(set){let qs=QUESTIONS.filter(q=>q.setId===set),order=[];for(let l=1;l<=3;l++){let part=qs.filter(q=>q.level===l);order.push(...(config.shuffle?shuffle(part):part))}state={set,qs:order,index:0,results:[],base:0,comboPoints:0,streak:0,longest:0,section:null,phase:'',deadline:0,duration:config.mode==='quick'?25:60,angle:0,knife:null,cut:null,animationAt:0};nextQuestion()}
+function current(){return state.qs[state.index]}
+function nextQuestion(){cancelAnimationFrame(raf);if(state.index>=15){finish();return}let q=current();state.phase='ready';state.section=null;state.cut=null;state.knife=null;state.angle=0;let lv=q.level;status.innerHTML=`🍲 ${THEMES[state.set-1][0]}　|　第 ${lv} 關・${names[lv-1]}　|　${state.index+1}/15　|　<span class="timer" id="clock">${state.duration}s</span>　|　⭐ <span id="score">${state.base+state.comboPoints}</span>`;
+app.innerHTML=`<div class="game"><div class="board" id="board"><div class="plate"></div><canvas id="canvas" aria-label="揮刀區域，請用手指或滑鼠拖動"></canvas><div class="slashhint" id="hint">👆 直接在食材上劃一刀！食材表面不會預先標出截面</div></div><aside class="side"><div class="order"><span class="pill">🍽️ 訂單 ${state.index+1} / 15</span><h2>${escapeHtml(q.foodName)}</h2><p>${lv===2?'請切出均勻截面！':lv===3?`請按圖示切法，切出 <strong>${escapeHtml(q.targetSection)}</strong>。`: `請依照指定的${q.shownCutPlane.direction==='H'?'水平':q.shownCutPlane.direction==='A'?'斜向':'鉛垂'}平面切開食材。`}</p><div class="muted small">${solidLabel(q)}・${q.placement==='upright'?'直立':'橫放'}</div>${lv===2?'':`<p class="small">指定平面：${planeLabel(q.shownCutPlane)}</p>`}</div><div class="order" id="controls"><strong>🗡️ 揮刀控制</strong><p class="small">橫向劃 = 水平切割；上下劃 = 鉛垂切割。切割位置由手勢位置控制；方向按三維桌面定義，不單是螢幕上的一條線。</p><div class="buttons"><button id="angle0" type="button">鉛垂橫截面</button><button id="angle90" type="button">鉛垂縱截面</button></div><div class="small muted" id="anglelabel"></div><div class="buttons" style="margin-top:10px"><button id="assistH">↔ 按鈕替代：水平下刀</button><button id="assistV">↕ 按鈕替代：鉛垂下刀</button></div>${lv===3?'<button id="reject" class="reject">🚫 拒絕不可能訂單</button>':''}</div><div id="feedback-slot"></div><div class="notice small">📐 一刀只用一個平面；食材分開後的截面會轉正展示。答題後不能重切計分。</div></aside></div>`;
+$('#angle0').onclick=()=>{state.angle=0;refreshAngle()};$('#angle90').onclick=()=>{state.angle=90;refreshAngle()};$('#assistH').onclick=()=>submitCut('H',0,0);$('#assistV').onclick=()=>submitCut('V',state.angle,0);if(lv===3)$('#reject').onclick=()=>settle('reject',null);if(lv!==2){state.angle=q.shownCutPlane.angle||0;$('#angle0').disabled=true;$('#angle90').disabled=true}else{$('#angle0').disabled=false;$('#angle90').disabled=false}refreshAngle();setupCanvas();state.startedAt=performance.now();state.deadline=Date.now()+state.duration*1000;state.phase='active';drawFrame()}
+function solidLabel(q){return ({cylinder:'直圓柱',cone:'直圓錐',frustum:'直圓錐台',sphere:'球體',prism3:'直三角柱',prismTrapezoid:'直梯形角柱',prism5:'直五角柱',prism6:'直六角柱',pyramid4:'正四角錐',pyramid5:'直五角錐',cube:'正方體'})[q.solidType]||q.solidType}
+function planeLabel(p){return p.direction==='H'?'平行桌面的水平平面':p.direction==='A'?'穿過球內的斜向平面':`垂直桌面的鉛垂平面（${p.angle===90?'沿柱軸／縱向':'垂直柱軸／橫向'}）`}
+function refreshAngle(){const lab=$('#anglelabel');if(lab)lab.textContent=`目前鉛垂朝向：${state.angle===90?'縱向（平面沿 X 軸）':'橫向（平面垂直 X 軸）'}。此選擇不代表正確答案。`;['angle0','angle90'].forEach((x,i)=>{const b=$('#'+x);if(b)b.classList.toggle('selected',state.angle===(i?90:0))})}
+let canvas,ctx,W,H,ptr=null;
+function setupCanvas(){canvas=$('#canvas');ctx=canvas.getContext('2d');const resize=()=>{if(!canvas?.isConnected)return;let r=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);W=r.width;H=r.height;canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);render()};resize();if(window.ResizeObserver){new ResizeObserver(resize).observe(canvas)}else window.addEventListener('resize',resize,{passive:true});canvas.onpointerdown=e=>{if(state.phase!=='active')return;ptr={id:e.pointerId,x:e.offsetX,y:e.offsetY,ex:e.offsetX,ey:e.offsetY};canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(ptr&&ptr.id===e.pointerId){ptr.ex=e.offsetX;ptr.ey=e.offsetY;render()}};canvas.onpointerup=e=>{if(!ptr||ptr.id!==e.pointerId)return;let p=ptr;ptr=null;let dx=e.offsetX-p.x,dy=e.offsetY-p.y;if(Math.hypot(dx,dy)<42){toast('請劃出長一點的刀光');render();return}let dir=Math.abs(dx)>=Math.abs(dy)*1.35?'H':Math.abs(dy)>=Math.abs(dx)*1.35?'V':'A';let q=current();if(dir==='A'&&q.solidType!=='sphere'){toast('這題請使用橫向或上下方向劃刀');render();return}let offset=dir==='H'?((H*.5-(p.y+e.offsetY)/2)/(Math.min(W,H)*.22)):((p.x+e.offsetX)/2-W*.5)/(Math.min(W,H)*.22);submitCut(dir,dir==='V'?state.angle:0,offset)};canvas.onpointercancel=()=>{ptr=null;render()};}
+function getPlane(q,dir,ang,offset){let actual=q.solidType==='sphere'&&dir==='A'?'A':dir;return G.plane(actual,ang,offset)}
+function shapeOf(q,pl){let pts=G.section(G.mesh(q),pl);if(pts.length<3)return null;if(q.solidType==='sphere'||['cylinder','cone','frustum'].includes(q.solidType)&&Math.abs(G.dot(pl.n,q.placement==='upright'?[0,1,0]:[1,0,0]))>.96)return '圓形';if(q.solidType==='cone'&&Math.abs(G.dot(pl.n,[0,1,0]))<.04&&Math.abs(pl.d)<.09)return '三角形';if(q.solidType==='frustum'&&Math.abs(G.dot(pl.n,[0,1,0]))<.04&&Math.abs(pl.d)<.09)return '梯形';if(q.solidType.startsWith('prism')||q.solidType==='cube'){let axis=q.placement==='upright'?[0,1,0]:[1,0,0],dn=Math.abs(G.dot(pl.n,axis));if(dn>.98){return ({prism3:'三角形',prismTrapezoid:'梯形',prism5:'五邊形',prism6:'六邊形',cube:'正方形'})[q.solidType]}if(dn<.02)return '長方形'}if(q.solidType==='pyramid4'&&pl.n[1]>.98)return '正方形';return pts.length<=3?'三角形':pts.length===4?'四邊形':`${pts.length}邊形`}
+function uniform(q,dir,ang,offset){if(!['prism3','prismTrapezoid','prism5','prism6','cylinder','cube'].includes(q.solidType))return false;let axis=q.placement==='upright'?[0,1,0]:[1,0,0],pl=getPlane(q,dir,ang,offset);return Math.abs(G.dot(pl.n,axis))>.985&&G.section(G.mesh(q),pl).length>=3}
+function submitCut(dir,ang,offset){if(!state||state.phase!=='active')return;let q=current(),pl=getPlane(q,dir,ang,offset),mesh=G.mesh(q),lim=G.extent(mesh,pl.n),range=lim[1]-lim[0];if(q.level!==2){let fixed=q.shownCutPlane;/* 第 1 / 3 關方向由玩家手勢指定，平面位置可操控；離中心不能超出模型 */if(fixed.direction==='A'&&dir==='A'){} }let normOffset=Math.max(lim[0]+range*.12,Math.min(lim[1]-range*.12,offset));pl.d=normOffset;let pts=G.section(mesh,pl);if(pts.length<3){toast('刀未穿過食材，請重新瞄準');return}state.cut={pl,pts,dir,ang,at:performance.now()};settle('cut',state.cut)}
+function settle(kind,cut){if(state.phase!=='active')return;state.phase='settled';let q=current(),elapsed=Math.min(state.duration,Math.max(0,(Date.now()- (state.deadline-state.duration*1000))/1000));if(Date.now()>state.deadline)elapsed=state.duration;
+let correct=false,why='',realShape=cut?shapeOf(q,cut.pl):null;if(kind==='timeout'){why='時間到了，這題不計分。'}else if(kind==='reject'){correct=q.level===3&&!q.isPossible;why=correct?'幾何上不可行：'+q.rejectionReason:'這張訂單其實可以切出來。'}else if(!cut){why='沒有成功切開食材。'}else if(q.level===1){let expect=q.shownCutPlane.direction;correct= expect===cut.dir&&(expect!=='V'||cut.ang===q.shownCutPlane.angle)&&realShape===q.expectedSection;why=correct?`成功沿指定方向切開！截面是${realShape}。`:`本題需沿指定${planeLabel(q.shownCutPlane)}揮刀。`;}else if(q.level===2){correct=uniform(q,cut.dir,cut.ang,cut.pl.d);why=correct?`切出了均勻截面（${realShape}）：沿軸不同位置的形狀和大小相同。`:'這個方向切出來的截面會隨位置改變，並非均勻截面。'}else {let expect=q.shownCutPlane;let matched=cut.dir===expect.direction&&(cut.dir!=='V'||cut.ang===expect.angle);correct=q.isPossible&&matched&&realShape===q.targetSection;why=!matched?`這張訂單指定${planeLabel(expect)}，你的刀法不同。`:q.isPossible?`實際切面是${realShape}。訂單要求${q.targetSection}。`:`此單不可能：${q.rejectionReason}`;}
+if(Date.now()>state.deadline && kind!=='timeout'){/* 手勢完成於限時後，不計分 */correct=false;why='下刀時已超出時限，本題不計分。'}let base=correct?Math.round(500+500*(1-elapsed/state.duration)):0;state.streak=correct?state.streak+1:0;state.longest=Math.max(state.longest,state.streak);let combo=correct&&state.streak%3===0?150:0;state.base+=base;state.comboPoints+=combo;state.results.push({id:q.id,correct,kind,elapsed,base,combo,why,realShape,dir:cut?.dir||null,angle:cut?.ang??null,offset:cut?.pl.d??null});state.animationAt=performance.now();state.phase='feedback';sound(correct?'win':'wrong');$('#score').textContent=state.base+state.comboPoints;const label=correct?(kind==='reject'?'✅ 幾何上不可行':'✨ 完美出菜！'):'🧑‍🍳 再觀察一下';$('#feedback-slot').innerHTML=`<div class="feedback"><h2>${label} ${combo?'🔥 三連擊 +150！':''}</h2><strong>${correct?'+'+base+' 分':'0 分'}</strong><p>${escapeHtml(why)}</p><div id="section-label" class="small"></div><canvas class="sectionview" id="sectionCanvas" width="320" height="150"></canvas><p class="small muted">${escapeHtml(q.explanation)}</p>${q.level===2?'<p class="small">以下是不同位置的比較示意，並非玩家再切多刀。</p>':''}<button class="primary" id="next" style="width:100%">${state.index===14?'🍽️ 查看成績':'➡️ 下一道菜'}</button></div>`;$('#controls').querySelectorAll('button').forEach(b=>b.disabled=true);$('#board').classList.add('sliced');$('#hint').textContent=kind==='reject'?'✅ 食材保持完整，沒有下刀':kind==='timeout'?'⌛ 超時：食材保持完整':'🔪 已完成唯一一刀，正在展示截面';$('#next').onclick=()=>{state.index++;nextQuestion()};renderSection();if(config.reduced)render();}
+function renderSection(){let el=$('#sectionCanvas');if(!el)return;let c=el.getContext('2d'),q=current(),r=state.results.at(-1);c.clearRect(0,0,el.width,el.height);c.fillStyle='#fffaf1';c.fillRect(0,0,320,150);let pts=state.cut?.pts||G.section(G.mesh(q),getPlane(q,q.shownCutPlane?.direction||q.standardDirection,q.shownCutPlane?.angle||0,0));let pl=state.cut?.pl||getPlane(q,q.shownCutPlane?.direction||q.standardDirection,q.shownCutPlane?.angle||0,0);if(!pts.length)return;let v=G.section2D(pts,pl),minx=Math.min(...v.map(p=>p[0])),maxx=Math.max(...v.map(p=>p[0])),miny=Math.min(...v.map(p=>p[1])),maxy=Math.max(...v.map(p=>p[1]));let scale=Math.min(220/Math.max(.01,maxx-minx),105/Math.max(.01,maxy-miny)),cx=(maxx+minx)/2,cy=(maxy+miny)/2;c.beginPath();v.forEach(([x,y],i)=>i?c.lineTo(160+(x-cx)*scale,73+(y-cy)*scale):c.moveTo(160+(x-cx)*scale,73+(y-cy)*scale));c.closePath();c.fillStyle='#f9c981';c.fill();c.lineWidth=3;c.strokeStyle='#7a4b35';c.stroke();c.fillStyle='#71513e';c.font='bold 13px sans-serif';c.textAlign='center';c.fillText(`截面正視圖：${r.realShape||shapeOf(q,pl)||'截面輪廓'}`,160,140);}
+function drawFrame(){if(!state||!canvas?.isConnected)return;let now=Date.now();if(state.phase==='active'){let left=Math.max(0,Math.ceil((state.deadline-now)/1000));let el=$('#clock');if(el)el.textContent=left+'s';if(now>=state.deadline){settle('timeout',null)}}render();raf=requestAnimationFrame(drawFrame)}
+function hashFood(v){let h=2166136261;for(const ch of String(v)){h=Math.imul(h^ch.charCodeAt(0),16777619)}return h>>>0}
+function randHash(v){let x=Math.sin(v*12.9898+78.233)*43758.5453;return x-Math.floor(x)}
+function materialFor(q){
+ const n=q.foodName||'',a=q.visualStyle?.palette||0;
+ const defs=[
+  {light:'#c9ef9b',mid:'#78bd60',dark:'#367743',inside:'#d6f2b3',rim:'#579342'},
+  {light:'#ffe2d6',mid:'#f6a6a2',dark:'#ba5669',inside:'#ffdbcc',rim:'#c77a70'},
+  {light:'#fff0b6',mid:'#e6bb65',dark:'#956033',inside:'#ffe3a5',rim:'#b17d48'},
+  {light:'#d6f4fc',mid:'#8dc7d7',dark:'#397c91',inside:'#dbf4f6',rim:'#589cad'},
+  {light:'#e6d7fb',mid:'#b497df',dark:'#73548f',inside:'#ecddff',rim:'#9677bc'},
+  {light:'#ffe1b2',mid:'#d89456',dark:'#985735',inside:'#ffe1a4',rim:'#b97445'},
+  {light:'#c8f5df',mid:'#72c9ad',dark:'#328877',inside:'#d2f8d9',rim:'#429981'},
+  {light:'#fff1bc',mid:'#e3bd75',dark:'#a8793d',inside:'#ffe8b2',rim:'#b98c51'},
+  {light:'#ffe0e9',mid:'#dc9db7',dark:'#97516e',inside:'#ffdfeb',rim:'#b57490'}];
+ let m=defs[(Number(a)||0)%defs.length];
+ if(/朱古力|可可|咖啡|黑糖|巧克力/.test(n))m={light:'#bf8f69',mid:'#865439',dark:'#4d3029',inside:'#b87a56',rim:'#6d432d'};
+ if(/西瓜|番茄|士多啤梨|草莓/.test(n))m={light:'#ffaca0',mid:'#ee6658',dark:'#a93436',inside:'#f6796c',rim:'#a84242'};
+ if(/青瓜|奇異果|抹茶|青蘋果/.test(n))m={light:'#c4e98b',mid:'#83bb50',dark:'#487c38',inside:'#c8e6a0',rim:'#4f8a40'};
+ if(/芝士|蛋|奶油|布甸|芒果/.test(n))m={light:'#fff0bb',mid:'#efc45f',dark:'#bb8634',inside:'#fff0ba',rim:'#bf994f'};
+ return m;
+}
+function foodTheme(q){
+ const n=q.foodName||'';
+ if(/西瓜/.test(n))return 'watermelon';
+ if(/青瓜|翠玉瓜/.test(n))return 'cucumber';
+ if(/奇異果/.test(n))return 'kiwi';
+ if(/壽司|飯糰/.test(n))return 'sushi';
+ if(/瑞士卷|蛋糕卷|卷蛋/.test(n))return 'roll';
+ if(/布丁|布甸|焦糖/.test(n))return 'pudding';
+ if(/甜甜圈|冬甩/.test(n))return 'donut';
+ if(/啫喱|果凍|寒天/.test(n))return 'jelly';
+ if(/芝士|乳酪|起司/.test(n))return 'cheese';
+ if(/朱古力|巧克力|可可|黑糖|咖啡/.test(n))return 'choco';
+ if(/蛋糕|泡芙|批|撻/.test(n))return 'cake';
+ return 'generic';
+}
+function drawFace(cx,cy,s){
+ ctx.save();
+ ctx.fillStyle='#3f2a23';
+ ctx.beginPath();ctx.ellipse(cx-s*.22,cy-s*.04,s*.045,s*.07,0,0,Math.PI*2);ctx.fill();
+ ctx.beginPath();ctx.ellipse(cx+s*.22,cy-s*.04,s*.045,s*.07,0,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle='#5b392f';ctx.lineWidth=Math.max(1.4,s*.024);ctx.lineCap='round';
+ ctx.beginPath();ctx.arc(cx,cy+s*.02,s*.12,.12*Math.PI,.88*Math.PI);ctx.stroke();
+ ctx.fillStyle='rgba(255,138,155,.55)';
+ ctx.beginPath();ctx.arc(cx-s*.33,cy+s*.05,s*.075,0,Math.PI*2);ctx.fill();
+ ctx.beginPath();ctx.arc(cx+s*.33,cy+s*.05,s*.075,0,Math.PI*2);ctx.fill();
+ ctx.restore();
+}
+function drawFoodDecor(q,bounds,progress,material,seed){
+ if(!bounds||!isFinite(bounds.w)||bounds.w<70||bounds.h<55)return;
+ const theme=foodTheme(q),cx=bounds.cx,cy=bounds.cy,w=bounds.w,h=bounds.h,s=Math.min(w,h);
+ ctx.save();
+ ctx.beginPath();ctx.ellipse(cx,cy,w*.36,h*.34,0,0,Math.PI*2);ctx.clip();
+ if(theme==='watermelon'){
+  ctx.fillStyle='#67b24f';ctx.fillRect(bounds.left,bounds.bottom-h*.16,w,h*.18);
+  ctx.fillStyle='#dbfff0';ctx.fillRect(bounds.left,bounds.bottom-h*.12,w,h*.035);
+  for(let i=0;i<7;i++){let xx=bounds.left+w*(.15+i*.11+randHash(seed+i)*.03),yy=bounds.top+h*(.28+randHash(seed+i*3)*.28);ctx.save();ctx.translate(xx,yy);ctx.rotate((i%2?1:-1)*.35);ctx.fillStyle='#2e2622';ctx.beginPath();ctx.moveTo(0,-s*.035);ctx.quadraticCurveTo(s*.03,0,0,s*.04);ctx.quadraticCurveTo(-s*.03,0,0,-s*.035);ctx.fill();ctx.restore();}
+ }
+ if(theme==='cucumber' || theme==='kiwi'){
+  ctx.strokeStyle=theme==='kiwi'?'#dcefa0':'#d8f1ba';ctx.lineWidth=s*.06;ctx.beginPath();ctx.ellipse(cx,cy,w*.21,h*.21,0,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle=theme==='kiwi'?'#f6f2d9':'#e5f7c9';ctx.beginPath();ctx.ellipse(cx,cy,w*.085,h*.085,0,0,Math.PI*2);ctx.fill();
+  for(let i=0;i<10;i++){const a=i*Math.PI*2/10,rx=Math.cos(a)*w*.15,ry=Math.sin(a)*h*.15;ctx.beginPath();ctx.arc(cx+rx,cy+ry,s*.011,0,Math.PI*2);ctx.fillStyle='#fff5d8';ctx.fill()}
+ }
+ if(theme==='sushi'){
+  ctx.fillStyle='rgba(34,41,38,.82)';ctx.fillRect(cx-w*.16,bounds.top+h*.12,w*.32,h*.52);
+  for(let i=0;i<12;i++){ctx.beginPath();ctx.arc(cx-w*.12+randHash(seed+i)*w*.24,bounds.top+h*.18+randHash(seed+30+i)*h*.38,s*.014,0,Math.PI*2);ctx.fillStyle='#fbfaf1';ctx.fill()}
+  ctx.fillStyle='#f08f6d';ctx.beginPath();ctx.roundRect?.(cx-w*.18,bounds.top+h*.06,w*.36,h*.13,12); if(ctx.roundRect){ctx.fill()} else {ctx.fillRect(cx-w*.18,bounds.top+h*.06,w*.36,h*.13)}
+ }
+ if(theme==='roll'){
+  ctx.strokeStyle='rgba(255,250,234,.92)';ctx.lineWidth=s*.045;ctx.beginPath();ctx.arc(cx,cy,s*.03,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,s*.12,0,Math.PI*1.85);ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,s*.22,.25,Math.PI*1.8);ctx.stroke();
+ }
+ if(theme==='pudding'){
+  ctx.fillStyle='rgba(131,68,28,.68)';ctx.beginPath();ctx.ellipse(cx, bounds.top+h*.16, w*.21, h*.07,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.18)';ctx.beginPath();ctx.ellipse(cx-w*.1,cy-h*.08,w*.06,h*.14,-.3,0,Math.PI*2);ctx.fill();
+ }
+ if(theme==='donut'){
+  ctx.fillStyle='rgba(255,182,206,.78)';ctx.beginPath();ctx.ellipse(cx,cy,w*.24,h*.19,0,0,Math.PI*2);ctx.fill();
+  ctx.globalCompositeOperation='destination-out';ctx.beginPath();ctx.ellipse(cx,cy,w*.09,h*.075,0,0,Math.PI*2);ctx.fill();ctx.globalCompositeOperation='source-over';
+  for(let i=0;i<14;i++){const xx=cx+(randHash(seed+i)-.5)*w*.3,yy=cy+(randHash(seed+80+i)-.5)*h*.22;ctx.save();ctx.translate(xx,yy);ctx.rotate(randHash(seed+150+i)*2);ctx.fillStyle=['#68c2ff','#ffd35c','#98d770','#ff8ea1'][i%4];ctx.fillRect(-s*.008,-s*.03,s*.016,s*.06);ctx.restore()}
+ }
+ if(theme==='jelly'){
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  for(let i=0;i<4;i++){ctx.beginPath();ctx.ellipse(cx-w*.1+i*w*.08,cy-h*.06+i*h*.02,w*.045,h*.07,0,0,Math.PI*2);ctx.fill()}
+ }
+ if(theme==='cheese'){
+  ctx.fillStyle='rgba(210,155,91,.75)';ctx.fillRect(bounds.left+w*.1,bounds.bottom-h*.12,w*.8,h*.1);
+  for(let i=0;i<5;i++){ctx.beginPath();ctx.arc(bounds.left+w*(.2+i*.15),bounds.top+h*(.3+randHash(seed+i)*.25),s*(.025+randHash(seed+40+i)*.02),0,Math.PI*2);ctx.fillStyle='rgba(244,213,98,.85)';ctx.fill()}
+ }
+ if(theme==='choco'){
+  ctx.strokeStyle='rgba(71,43,32,.55)';ctx.lineWidth=s*.03;for(let i=0;i<3;i++){ctx.beginPath();ctx.moveTo(bounds.left+w*.18,bounds.top+h*(.22+i*.13));ctx.bezierCurveTo(cx,bounds.top+h*(.1+i*.14),cx,bounds.top+h*(.34+i*.08),bounds.right-w*.18,bounds.top+h*(.2+i*.13));ctx.stroke()}
+ }
+ if(theme==='cake'){
+  ctx.fillStyle='rgba(255,241,218,.85)';ctx.fillRect(bounds.left+w*.12,bounds.top+h*.2,w*.76,h*.1);
+  for(let i=0;i<6;i++){ctx.beginPath();ctx.arc(bounds.left+w*(.2+i*.1),bounds.top+h*.18,s*.014,0,Math.PI*2);ctx.fillStyle=i%2?'#ff9fa4':'#fff8f0';ctx.fill()}
+ }
+ if(theme==='generic'){
+  ctx.fillStyle='rgba(255,255,255,.12)';for(let i=0;i<6;i++){ctx.beginPath();ctx.arc(bounds.left+w*(.18+i*.11),bounds.top+h*(.22+randHash(seed+i)*.32),s*.018,0,Math.PI*2);ctx.fill()}
+ }
+ drawFace(cx,cy+s*.04,s*.58);
+ ctx.restore();
+}
+function render(){if(!ctx||!canvas?.isConnected||!state)return;ctx.clearRect(0,0,W,H);let q=current(),mesh=G.mesh(q),sc=Math.min(W/5,H/4.8),X=W*.5,Y=H*.47,cut=state.cut,now=performance.now(),progress=cut?Math.min(1,(now-state.animationAt)/(config.reduced?80:1050)):0,pl=cut?.pl;let palette=colors[q.visualStyle.palette],faces=[];function pos(p){let [u,v,d]=G.project(p);return [X+u*sc,Y+v*sc,d]}
+ctx.save();ctx.fillStyle='rgba(104,72,46,.18)';ctx.beginPath();ctx.ellipse(X,Y+sc*1.03,sc*1.25,sc*.25,0,0,Math.PI*2);ctx.fill();ctx.restore();
+for(let side of cut?[1,-1]:[0]){for(let tri of mesh){let clipped=side?G.clip(tri,pl,side):tri;if(clipped.length<3)continue;let delta=side?G.mul(pl.n,side*.28*progress):[0,0,0];let poly=clipped.map(v=>pos(G.add(v,delta)));let shade=Math.min(.95,Math.max(.38,.72+(.12*(poly[0][2]+poly[1][2]+poly[2][2]))));faces.push({poly,depth:poly.reduce((s,p)=>s+p[2],0)/poly.length,fill:palette[0],shade});}
+if(side&&cut.pts.length){let delta=G.mul(pl.n,side*.28*progress),poly=cut.pts.map(v=>pos(G.add(v,delta)));faces.push({poly,depth:poly.reduce((s,p)=>s+p[2],0)/poly.length+.002,fill:'#fff0bb',cap:true})}}
+faces.sort((a,b)=>a.depth-b.depth);
+// 以物料色彩、漫反射漸層和細小食材紋理代替原來的三角網格描邊。
+// 所有外形及切割仍然採用同一 geometry.js 幾何模型。
+const material=materialFor(q),seed=hashFood(q.foodId||q.id);
+let bodyPts=[];
+for(let i=0;i<faces.length;i++){
+ const f=faces[i],poly=f.poly;if(poly.length<3)continue;
+ let minX=Math.min(...poly.map(v=>v[0])),maxX=Math.max(...poly.map(v=>v[0]));
+ let minY=Math.min(...poly.map(v=>v[1])),maxY=Math.max(...poly.map(v=>v[1]));
+ ctx.save();ctx.beginPath();poly.forEach((v,j)=>j?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]));ctx.closePath();ctx.clip();
+ if(f.cap){ctx.fillStyle=material.inside;ctx.fillRect(minX-1,minY-1,maxX-minX+2,maxY-minY+2)}
+ else{
+  const grad=ctx.createLinearGradient(minX,minY,maxX+.01,maxY+.01);
+  grad.addColorStop(0,material.light);grad.addColorStop(.42,material.mid);grad.addColorStop(1,material.dark);
+  ctx.fillStyle=grad;ctx.fillRect(minX-2,minY-2,maxX-minX+4,maxY-minY+4);
+  // 食物表面光澤；避免大量三角形邊線產生低模鐵絲網效果。
+  ctx.globalAlpha=.13;ctx.fillStyle='#fff';ctx.fillRect(minX,minY,Math.max(1,(maxX-minX)*.2),maxY-minY);ctx.globalAlpha=1;
+ }
+ // 可重現的細粒紋理。僅為裝飾，不影響截面數學判定。
+ if(i%5===0){const density=f.cap?7:3;for(let j=0;j<density;j++){
+  const r1=randHash(seed+i*97+j*127),r2=randHash(seed+i*213+j*61+17);
+  const xx=minX+(maxX-minX)*r1,yy=minY+(maxY-minY)*r2;
+  ctx.beginPath();ctx.arc(xx,yy,f.cap?1.8:.8,0,Math.PI*2);
+  ctx.fillStyle=f.cap?'rgba(135,75,39,.16)':'rgba(255,255,255,.12)';ctx.fill();
+ }}
+ ctx.restore();
+ if(!f.cap)bodyPts.push(...poly);
+ if(f.cap){ctx.beginPath();poly.forEach((v,j)=>j?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]));ctx.closePath();ctx.strokeStyle=material.rim;ctx.lineWidth=2.4;ctx.stroke()}
+}
+if(bodyPts.length){let xs=bodyPts.map(p=>p[0]),ys=bodyPts.map(p=>p[1]);drawFoodDecor(q,{left:Math.min(...xs),right:Math.max(...xs),top:Math.min(...ys),bottom:Math.max(...ys),w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys),cx:(Math.min(...xs)+Math.max(...xs))/2,cy:(Math.min(...ys)+Math.max(...ys))/2},progress,material,seed)}
+// 不在食材上顯示任何預設切割平面或輔助截面；只由手指實際下刀。
+// 輪廓外的刀光位置按照實際用於裁切的平面法向與偏移投影
+if(cut&&progress<.85&&!config.reduced){ctx.save();ctx.strokeStyle=`rgba(255,255,255,${.85-progress})`;ctx.lineWidth=7;ctx.shadowColor='#fff8b9';ctx.shadowBlur=17;ctx.beginPath();let z=G.project(G.mul(pl.n,pl.d));if(cut.dir==='H'){ctx.moveTo(X-sc*2,Y+z[1]*sc);ctx.lineTo(X+sc*2,Y+z[1]*sc)}else{ctx.moveTo(X+z[0]*sc-sc*.7,Y-sc*1.8);ctx.lineTo(X+z[0]*sc+sc*.7,Y+sc*1.8)}ctx.stroke();ctx.restore()}
+if(ptr){ctx.beginPath();ctx.moveTo(ptr.x,ptr.y);ctx.lineTo(ptr.ex,ptr.ey);ctx.lineWidth=7;ctx.strokeStyle='#fff9ec';ctx.shadowColor='#ffe99d';ctx.shadowBlur=15;ctx.stroke();ctx.shadowBlur=0}
+if(state.phase==='active'&&q.level!==2){/* 指定平面提示：畫在模型附近，不把截面當答案展示 */ctx.fillStyle='#614231';ctx.font='bold 13px sans-serif';ctx.textAlign='center';ctx.fillText('🗡️ 按右側訂單方向劃刀',X,Math.min(H-50,Y+sc*1.7))}}
+function finish(){cancelAnimationFrame(raf);state.phase='ended';let total=state.base+state.comboPoints,correct=state.results.filter(x=>x.correct).length,avg=state.results.reduce((s,x)=>s+x.elapsed,0)/15,levels=[0,1,2].map(i=>state.results.slice(i*5,i*5+5).filter(r=>r.correct).length);let record={date:new Date().toLocaleString('zh-HK'),name:config.nickname,set:state.set,mode:config.mode,total,accuracy:Math.round(correct/15*100)};let scores=safeStore.get('chef-scores',[]);scores.push(record);safeStore.set('chef-scores',scores);let played=safeStore.get('chef-played',[]);safeStore.set('chef-played',[...new Set([...played,state.set])]);status.textContent='🍽️ 出菜完成！';const wrong=state.results.filter(x=>!x.correct);app.innerHTML=`<div class="panel"><h1>🏆 主廚出菜完成！</h1><div class="resultdish">🥒 🍰 🍣 🍦 🍮</div><div class="scores"><div class="scorebox">總分<strong>${total.toLocaleString()}</strong></div><div class="scorebox">正確率<strong>${Math.round(correct/15*100)}%</strong></div><div class="scorebox">基本得分<strong>${state.base}</strong></div><div class="scorebox">連擊加分<strong>${state.comboPoints}</strong></div><div class="scorebox">平均答題時間<strong>${avg.toFixed(1)} 秒</strong></div><div class="scorebox">最長連擊<strong>${state.longest} 題</strong></div></div><p>第一關 ${levels[0]}/5 ｜ 第二關 ${levels[1]}/5 ｜ 第三關 ${levels[2]}/5</p><div class="notice">${levels[1]<4?'均勻截面除了形狀相同，大小也要相同。':levels[2]<4?'你已掌握不少基本截面，可多留意橫放角柱的不同切割朝向。':'你能以手勢辨認不同幾何切面，試試其他菜單！'}<br>先看立體如何擺放，再看切割平面；一刀是一個平面，不是多刀雕刻。</div><h2>錯題重溫（不計分）</h2>${wrong.length?wrong.map(r=>{let q=QUESTIONS.find(x=>x.id===r.id);return `<details class="review"><summary>${q.id}・${escapeHtml(q.foodName)}：${escapeHtml(r.why)}</summary><p>原立體：${solidLabel(q)}（${q.placement==='upright'?'直立':'橫放'}）<br>你的操作：${r.kind==='reject'?'拒絕訂單':r.kind==='timeout'?'超時':(r.dir==='H'?'水平':r.dir==='V'?'鉛垂':'斜向')+'一刀'}<br>教師標準平面：${planeLabel(q.shownCutPlane||{direction:q.standardDirection,angle:0})}<br>正確截面：${q.expectedSection||'不可能'}<br>${escapeHtml(q.explanation)}</p></details>`}).join(''):'<p>全部答對，做得好！</p>'}<div class="actions"><button class="primary" id="again">🎲 另一套菜單</button><button id="home">🏠 返回首頁</button><button id="ranking">🏆 排行榜</button></div></div>`;$('#again').onclick=()=>{let played=safeStore.get('chef-played',[]),fresh=THEMES.map((_,i)=>i+1).filter(x=>!played.includes(x));start((fresh.length?fresh:THEMES.map((_,i)=>i+1))[Math.floor(Math.random()*(fresh.length||THEMES.length))])};$('#home').onclick=home;$('#ranking').onclick=ranking}
+function ranking(){cancelAnimationFrame(raf);state=null;status.textContent='本機成績';let data=safeStore.get('chef-scores',[]);app.innerHTML=`<div class="panel"><h1>🏆 本裝置排行榜</h1><div class="notice">此排行榜只保存於本裝置，並非全班即時連線排名。兩種模式分開排名。</div><div class="actions"><button id="quick">⚡ 25 秒快閃</button><button id="full">🍽️ 60 秒完整</button><button id="home">🏠 返回首頁</button></div><div id="ranklist"></div></div>`;const show=m=>{$('#ranklist').innerHTML=`<h2>${m==='quick'?'快閃':'完整'}模式</h2>${data.filter(x=>x.mode===m).sort((a,b)=>b.total-a.total).slice(0,20).map((x,i)=>`<div class="review">${i+1}. ${escapeHtml(x.name)}　⭐ ${x.total}　${x.accuracy}%　${THEMES[x.set-1]?.[0]||''}　<span class="small">${escapeHtml(x.date)}</span></div>`).join('')||'暫時沒有紀錄'}`};$('#quick').onclick=()=>show('quick');$('#full').onclick=()=>show('full');$('#home').onclick=home;show(config.mode)}
+function teacher(){cancelAnimationFrame(raf);state=null;status.textContent='教師答案・150 題';app.innerHTML=`<div class="panel"><h1>📚 教師答案與幾何設定</h1><p>所有菜單共 ${QUESTIONS.length} 題，題庫完整資料在 questions.js。第二關不向學生顯示標準刀法。</p><div class="actions"><button id="home">🏠 返回首頁</button><button id="csv">⬇️ 匯出 150 題 CSV</button></div><div class="teacher"><table><thead><tr><th>ID</th><th>食材</th><th>模型／擺放</th><th>標準刀法</th><th>截面／訂單</th><th>學習重點／不可行理由</th></tr></thead><tbody>${QUESTIONS.map(q=>`<tr><td>${q.id}</td><td>${escapeHtml(q.foodName)}</td><td>${solidLabel(q)}・${q.placement==='upright'?'直立':'橫放'}</td><td>${planeLabel(q.shownCutPlane||q.acceptedCutPlanes[0])}</td><td>${escapeHtml(q.expectedSection||'不可能：'+q.targetSection)}</td><td>${escapeHtml(q.learningObjective)}<br>${escapeHtml(q.rejectionReason)}</td></tr>`).join('')}</tbody></table></div></div>`;$('#home').onclick=home;$('#csv').onclick=()=>{let keys=['id','setId','level','foodName','solidType','placement','standardDirection','expectedSection','targetSection','isPossible','explanation','learningObjective'];let csv='\ufeff'+[keys,...QUESTIONS.map(q=>keys.map(k=>String(q[k]??'').replaceAll('"','""')))].map(a=>a.map(t=>'"'+t+'"').join(',')).join('\r\n');let link=document.createElement('a'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));link.href=url;link.download='geometry-chef-150-questions.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}}
+function updateMute(){const b=$('#mute');b.textContent=config.mute?'🔇':'🔊';b.title=config.mute?'開啟音效':'靜音'}$('#mute').onclick=()=>{config.mute=!config.mute;updateMute();toast(config.mute?'已靜音':'已開啟音效')};updateMute();home();
+window.ChefTest={shapeOf,uniform,getPlane,score:(t,T)=>Math.round(500+500*(1-Math.min(T,Math.max(0,t))/T))};
+})();
